@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>OCR Roulette Signal — Offline-friendly (browser)</title>
+<style>
+  :root{--bg:#0f0f10;--card:#151516;--muted:#bdbdbd;--accent:#ffd966;--ok:#7fd98f;--warn:#ff8c6b}
+  body{font-family:Inter,Segoe UI,Arial,Helvetica,sans-serif;background:var(--bg);color:#eaeaea;margin:0;padding:18px}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{margin:0 0 8px;font-size:20px}
+  .grid{display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start}
+  .card{background:var(--card);border:1px solid #222;padding:14px;border-radius:8px}
+  label{display:block;margin:8px 0 6px;font-weight:600;color:var(--muted)}
+  input[type=file]{color:var(--muted)}
+  button{background:#146;color:#fff;border:none;padding:10px 12px;border-radius:6px;cursor:pointer}
+  .muted{color:var(--muted);font-size:13px}
+  .preview{width:100%;background:#0b0b0b;border-radius:6px;border:1px solid #222;padding:8px;min-height:160px;display:flex;align-items:center;justify-content:center}
+  canvas{max-width:100%;height:auto;border-radius:6px}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#222;color:#fff;border:1px solid #333}
+  .big{font-size:28px;font-weight:700}
+  .log{background:#060606;padding:8px;border-radius:6px;border:1px solid #222;height:160px;overflow:auto;font-family:monospace;font-size:13px}
+  .controls{display:grid;gap:8px;margin-top:8px}
+  .center{display:flex;gap:8px;align-items:center}
+  .hint{font-size:13px;color:#a9a9a9}
+  .signal{font-size:18px;font-weight:700;margin-top:8px}
+  .good{color:var(--ok)} .medium{color:var(--accent)} .bad{color:var(--warn)}
+  input[type=range]{width:100%}
+  footer{margin-top:12px;color:#8b8b8b;font-size:13px}
+  .numbox{display:inline-block;padding:6px 10px;border-radius:6px;background:#0e0e0e;border:1px solid #333;margin:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>OCR Roulette Signal</h1>
+  <p class="muted">Envie o print da mesa. O sistema extrai os números por OCR e, quando detectar alta probabilidade, exibirá apenas **um sinal**: número + 1 vizinho.</p>
+
+  <div class="grid">
+    <div class="card">
+      <label>Enviar imagem / print</label>
+      <input id="file" type="file" accept="image/*">
+      <div style="margin-top:8px" class="center">
+        <button id="btnProcess">Processar imagem</button>
+        <button id="btnClear" style="background:#333">Limpar</button>
+        <button id="btnExample" style="background:#275">Exemplo</button>
+      </div>
+
+      <label style="margin-top:10px">Preview</label>
+      <div class="preview" id="preview">
+        <span class="muted">Nenhuma imagem carregada</span>
+      </div>
+
+      <div class="controls" style="margin-top:10px">
+        <label>Sensibilidade (quanto maior, mais conservador) <span id="sensVal">0.60</span></label>
+        <input id="sensitivity" type="range" min="0.30" max="0.95" step="0.01" value="0.60">
+        <div class="hint">Ajuste para tornar o sistema mais ou menos conservador.</div>
+      </div>
+
+      <label style="margin-top:10px">Histórico detectado (apenas leitura)</label>
+      <div class="log" id="ocrText">—</div>
+
+      <div style="margin-top:10px">
+        <div class="muted">Log</div>
+        <div class="log" id="log">Pronto.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div class="muted">Sinal (apenas se Alta probabilidade)</div>
+          <div id="signalBox" class="big">—</div>
+        </div>
+        <div style="text-align:right">
+          <div class="muted">Confiança</div>
+          <div id="conf" class="pill">—</div>
+        </div>
+      </div>
+
+      <div id="reason" class="signal muted">Aguardando imagem...</div>
+
+      <div style="margin-top:12px">
+        <div class="muted">Últimas ações</div>
+        <ul id="steps" class="muted" style="margin:6px 0 0;padding-left:18px"></ul>
+      </div>
+
+      <div style="margin-top:12px">
+        <button id="exportHist" style="background:#444">Exportar histórico detectado (.txt)</button>
+      </div>
+
+    </div>
+  </div>
+
+  <footer>Observação: OCR depende da qualidade da imagem. O sistema só mostrará 1 sinal quando confiança for alta. Use com responsabilidade.</footer>
+</div>
+
+<!-- Tesseract.js via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@2.1.5/dist/tesseract.min.js"></script>
+<script>
+(function(){
+  const wheel = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
+  const neighbors = {};
+  for(let i=0;i<wheel.length;i++){
+    neighbors[wheel[i]] = {left: wheel[(i-1+wheel.length)%wheel.length], right: wheel[(i+1)%wheel.length]};
+  }
+
+  const fileEl = document.getElementById('file');
+  const preview = document.getElementById('preview');
+  const btnProcess = document.getElementById('btnProcess');
+  const btnClear = document.getElementById('btnClear');
+  const btnExample = document.getElementById('btnExample');
+  const ocrText = document.getElementById('ocrText');
+  const log = document.getElementById('log');
+  const signalBox = document.getElementById('signalBox');
+  const conf = document.getElementById('conf');
+  const reason = document.getElementById('reason');
+  const steps = document.getElementById('steps');
+  const sensitivity = document.getElementById('sensitivity');
+  const sensVal = document.getElementById('sensVal');
+  const exportBtn = document.getElementById('exportHist');
+
+  let currentImage = null;
+  let lastNumbers = [];
+
+  sensitivity.addEventListener('input', ()=> sensVal.textContent = parseFloat(sensitivity.value).toFixed(2));
+
+  fileEl.addEventListener('change', (e)=>{
+    const f = e.target.files && e.target.files[0];
+    if(!f) return;
+    const url = URL.createObjectURL(f);
+    loadImageToPreview(url);
+  });
+
+  btnExample.addEventListener('click', ()=>{
+    // small example image (embedded as data URL would be large) - we skip; user should load own
+    alert('Carregue um print de exemplo do seu dispositivo.');
+  });
+
+  btnClear.addEventListener('click', ()=>{
+    currentImage = null;
+    lastNumbers = [];
+    preview.innerHTML = '<span class="muted">Nenhuma imagem carregada</span>';
+    ocrText.innerText = '—';
+    log.innerText = 'Limpo.';
+    signalBox.textContent = '—';
+    conf.textContent = '—';
+    reason.textContent = 'Aguardando imagem...';
+    steps.innerHTML = '';
+    fileEl.value = '';
+  });
+
+  btnProcess.addEventListener('click', async ()=>{
+    if(!currentImage){ alert('Carregue uma imagem primeiro.'); return; }
+    steps.innerHTML = '';
+    appendStep('Iniciando OCR...');
+    try{
+      const worker = Tesseract.createWorker();
+      await worker.load();
+      await worker.loadLanguage('por+eng');
+      await worker.initialize('por+eng');
+      const { data: { text } } = await worker.recognize(currentImage);
+      await worker.terminate();
+      appendStep('OCR concluído.');
+      ocrText.innerText = text.trim() || '—';
+      log.innerText = 'Texto extraído. Processando números...';
+      const nums = parseNumbers(text);
+      lastNumbers = nums;
+      appendStep('Números detectados: ' + nums.length);
+      if(nums.length===0){
+        signalBox.textContent = '—';
+        conf.textContent = '—';
+        reason.textContent = 'Nenhum número detectado. Tente imagem mais nítida ou corte a área com os números.';
+        return;
+      }
+      const analysis = analyzeHistory(nums);
+      const threshold = parseFloat(sensitivity.value);
+      const confPct = analysis.confidence;
+      conf.textContent = confPct.toFixed(1) + '%';
+      if(confPct/100 >= threshold){
+        signalBox.textContent = analysis.recommended + ' (vizinho: ' + analysis.neighbor + ')';
+        reason.className = 'signal good';
+        reason.textContent = 'SINAL — probabilidade alta';
+        appendStep(`SINAL: ${analysis.recommended} viz ${analysis.neighbor} — confiança ${confPct.toFixed(1)}%`);
+      } else {
+        signalBox.textContent = 'Sem sinal';
+        reason.className = 'signal';
+        reason.textContent = 'Sem sinal — probabilidade baixa';
+        appendStep(`Sem sinal — confiança ${confPct.toFixed(1)}%`);
+      }
+      log.innerText = `Finalizado. Números detectados: ${nums.length}. Confiança: ${confPct.toFixed(1)}%.`;
+    } catch(err){
+      console.error(err);
+      log.innerText = 'Erro OCR: ' + err.message;
+      appendStep('Erro: ' + err.message);
+    }
+  });
+
+  function loadImageToPreview(url){
+    const img = new Image();
+    img.onload = function(){
+      const canvas = document.createElement('canvas');
+      const maxW = 860;
+      const scale = Math.min(1, maxW / img.width);
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img,0,0,canvas.width,canvas.height);
+      preview.innerHTML = '';
+      preview.appendChild(canvas);
+      currentImage = canvas.toDataURL('image/png');
+      appendStep('Imagem carregada (' + Math.round(canvas.width) + 'x' + Math.round(canvas.height) + ').');
+    };
+    img.onerror = function(){
+      alert('Não foi possível carregar a imagem.');
+    };
+    img.src = url;
+  }
+
+  function appendStep(s){
+    const li = document.createElement('li');
+    li.textContent = s;
+    steps.insertBefore(li, steps.firstChild);
+  }
+
+  function parseNumbers(text){
+    if(!text) return [];
+    // clean: keep digits and spaces
+    const clean = text.replace(/[^\d\s]/g,' ').replace(/\s+/g,' ').trim();
+    const parts = clean.split(' ').filter(Boolean);
+    const nums = [];
+    for(const p of parts){
+      const n = parseInt(p,10);
+      if(!Number.isNaN(n) && n>=0 && n<=36) nums.push(n);
+    }
+    return nums;
+  }
+
+  function analyzeHistory(history){
+    const total = history.length;
+    // recency weight
+    const alpha = 0.035;
+    const weights = [];
+    for(let i=0;i<total;i++) weights.push(Math.exp(alpha * i));
+    const maxw = Math.max(...weights) || 1;
+    for(let i=0;i<weights.length;i++) weights[i] /= maxw;
+    const rec = Array(37).fill(0);
+    const freq = Array(37).fill(0);
+    for(let i=0;i<history.length;i++){
+      const v = history[i];
+      if(v>=0 && v<=36){ freq[v] += 1; rec[v] += weights[i]; }
+    }
+    const neighborBoost = 0.45;
+    const score = Array(37).fill(0);
+    for(let n=0;n<=36;n++){
+      const left = neighbors[n].left, right = neighbors[n].right;
+      score[n] = rec[n] + neighborBoost * (rec[left] + rec[right]) * 0.5;
+      score[n] += 0.01 * freq[n];
+    }
+    const bestIndex = argMax(score);
+    const left = neighbors[bestIndex].left, right = neighbors[bestIndex].right;
+    const leftScore = score[left] + 0.1*rec[left], rightScore = score[right] + 0.1*rec[right];
+    const chosenNeighbor = leftScore >= rightScore ? left : right;
+    const mean = meanOfArray(score);
+    const stdev = stdOfArray(score);
+    const z = stdev>0 ? (score[bestIndex] - mean) / stdev : 0;
+    let conf = 100 * (1 / (1 + Math.exp(-0.9*(z-1.2))));
+    conf = Math.max(0, Math.min(100, conf));
+    return { recommended: bestIndex, neighbor: chosenNeighbor, confidence: conf };
+  }
+
+  function argMax(arr){ let bi=0,bv=arr[0]; for(let i=1;i<arr.length;i++) if(arr[i]>bv){bv=arr[i];bi=i;} return bi; }
+  function meanOfArray(a){ return a.reduce((s,x)=>s+x,0)/a.length; }
+  function stdOfArray(a){ const m=meanOfArray(a); return Math.sqrt(a.reduce((s,x)=>s+(x-m)*(x-m),0)/a.length); }
+
+  // export detected history
+  exportBtn.addEventListener('click', ()=>{
+    if(!lastNumbers || lastNumbers.length===0){ alert('Nenhum histórico detectado para exportar.'); return; }
+    const txt = lastNumbers.join(' ');
+    const blob = new Blob([txt], {type:'text/plain;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'detected_history.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  // paste image support
+  window.addEventListener('paste', (ev)=>{
+    const items = ev.clipboardData && ev.clipboardData.items;
+    if(!items) return;
+    for(const it of items){
+      if(it.type && it.type.indexOf('image')!==-1){
+        const blob = it.getAsFile();
+        const url = URL.createObjectURL(blob);
+        loadImageToPreview(url);
+        appendStep('Imagem colada da área de transferência.');
+        break;
+      }
+    }
+  });
+
+  // drag & drop
+  preview.addEventListener('dragover', (e)=>{ e.preventDefault(); preview.style.opacity=0.8; });
+  preview.addEventListener('dragleave', ()=>{ preview.style.opacity=1; });
+  preview.addEventListener('drop', (e)=>{ e.preventDefault(); preview.style.opacity=1; const f = e.dataTransfer.files && e.dataTransfer.files[0]; if(f){ loadImageToPreview(URL.createObjectURL(f)); appendStep('Imagem arrastada.'); } });
+
+})();
+</script>
+</body>
+</html>
